@@ -2,7 +2,7 @@ from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 import httpx, re
 
-app = FastAPI(title="Aussie Property API", version="1.1.0")
+app = FastAPI(title="Aussie Property API", version="1.3.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -12,28 +12,17 @@ app.add_middleware(
 )
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-    "Accept": "application/json",
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
 }
 
 USER_AGENT = {"User-Agent": "AussiePropertyLookup/1.0"}
 
 
 # ─── helpers ───────────────────────────────────────────────────────────────────
-
-def _slug_from_address(address: str) -> str | None:
-    """
-    Extract 'suburb-state-postcode' slug from an address string.
-    E.g. '5 Smith St, Carlton VIC 3053' -> 'carlton-vic-3053'
-    """
-    m = re.search(
-        r"(\w+)\s+(VIC|NSW|QLD|SA|WA|TAS|ACT)\s+(\d{4})",
-        address, re.IGNORECASE
-    )
-    if m:
-        return f"{m.group(1).lower()}-{m.group(2).lower()}-{m.group(3)}"
-    return None
-
 
 def _state_name_to_abbr(state: str) -> str:
     mapping = {
@@ -44,42 +33,121 @@ def _state_name_to_abbr(state: str) -> str:
     return mapping.get(state.lower(), state.upper())
 
 
-def _fetch_allhomes_history(slug: str, page: int = 1, page_size: int = 20) -> dict:
-    """Query allhomes GraphQL for sold history of a locality."""
-    import json as _json, urllib.parse as _urllib
+def _slug_from_address(address: str) -> str | None:
+    """Extract 'suburb-state-postcode' slug from address string."""
+    m = re.search(
+        r"(\w+)\s+(VIC|NSW|QLD|SA|WA|TAS|ACT)\s+(\d{4})",
+        address, re.IGNORECASE
+    )
+    if m:
+        return f"{m.group(1).lower()}-{m.group(2).lower()}-{m.group(3)}"
+    return None
+
+
+def _parse_price(price_str: str) -> int | None:
+    """Convert '$1,234,567' or '1.23M' -> integer."""
+    if not price_str:
+        return None
+    s = str(price_str).replace('$', '').replace(',', '').strip().lower()
+    if s.endswith('m'):
+        try:
+            return int(float(s[:-1]) * 1_000_000)
+        except ValueError:
+            pass
     try:
-        variables = _json.dumps({
-            "locality": {"slug": slug, "type": "DIVISION"},
-            "filters": {"beds": {"lower": 0}, "baths": {"lower": 0}, "parks": {"lower": 0}},
-            "duration": {"unit": "ALL"},
-            "sort": {"type": "SOLD_AGE", "order": "DESC"},
-            "page": page,
-            "pageSize": page_size,
-        })
-        extensions = _json.dumps({
-            "persistedQuery": {
-                "version": 1,
-                "sha256Hash": "d16064a1e14de8b8192be6bece8e2bb0dec81e1d46d0736461fd8c9484211996",
-            }
-        })
-        # Build URL with manually-encoded JSON strings (no double-encoding)
-        query = _urllib.urlencode({
-            "operationName": "updateHistoryForLocality",
-            "variables": variables,
-            "extensions": extensions,
-        })
-        r = httpx.get(
-            f"https://www.allhomes.com.au/graphql?{query}",
-            headers={
-                **HEADERS,
-                "x-apollo-operation-name": "updateHistoryForLocality",
-            },
-            timeout=15,
-        )
+        return int(s)
+    except ValueError:
+        return None
+
+
+def _scrape_sold_listings(slug: str) -> list[dict]:
+    """
+    Scrape sold listings from allhomes.com.au/sold/{slug}/.
+    Parses the rendered HTML using discovered CSS class patterns.
+
+    Successfully extracts: address, price, beds, baths, cars, property type.
+    """
+    url = f"https://www.allhomes.com.au/sold/{slug}/"
+    try:
+        r = httpx.get(url, headers=HEADERS, timeout=15)
         r.raise_for_status()
-        return r.json()
     except Exception:
-        return {}
+        return []
+
+    html = r.text
+    listings = []
+
+    # ── Discovery: allhomes uses dynamic CSS hash class names, not data-testid ──
+    # Each listing card has: id="allhomes-search-listing-card-listing-details-{numeric_id}"
+    # Price appears in class="css-120mxi4" (e.g. $217,000)
+    # Beds/Baths/Cars appear as css-rhetjd spans after Bedrooms/Bathrooms/CarSpaces SVG icons
+    # Address: itemProp="streetAddress" within h2 itemProp="address"
+    #   + itemProp="addressLocality/addressRegion/postalCode"
+
+    listing_ids = re.findall(
+        r'id="allhomes-search-listing-card-listing-details-(\d+)"',
+        html
+    )
+
+    for lid in listing_ids:
+        id_str = f'id="allhomes-search-listing-card-listing-details-{lid}"'
+        start = html.find(id_str)
+        if start < 0:
+            continue
+
+        # Find end of this block (start of next listing or end of page)
+        end = html.find('id="allhomes-search-listing-card-listing-details-', start + 10)
+        block = html[start:end if end > 0 else start + 15000]
+
+        # ── Address ──────────────────────────────────────────────────────────
+        sa = re.search(r'itemProp="streetAddress"[^>]*>([^<]+)</span>', block)
+        street = sa.group(1).strip() if sa else ''
+
+        loc = re.findall(
+            r'itemProp="(addressLocality|addressRegion|postalCode)"[^>]*>([^<]+)</span>',
+            block
+        )
+        loc_dict = {k: v for k, v in loc}
+        suburb = loc_dict.get('addressLocality', '').strip()
+        state = loc_dict.get('addressRegion', '').strip()
+        postcode = loc_dict.get('postalCode', '').strip()
+        full_address = f"{street}, {suburb} {state} {postcode}".strip(', ')
+
+        # ── Price ────────────────────────────────────────────────────────────
+        price_m = re.search(r'\$(\d{3}(?:,\d{3})+|\d{6}(?!\d))', block)
+        price_str = price_m.group(0) if price_m else None
+        price = _parse_price(price_str)
+
+        # ── Beds / Baths / Cars ──────────────────────────────────────────────
+        rhetjd_nums = re.findall(r'class="css-rhetjd">(\d+)</span>', block)
+        beds = int(rhetjd_nums[0]) if len(rhetjd_nums) > 0 else None
+        baths = int(rhetjd_nums[1]) if len(rhetjd_nums) > 1 else None
+        cars = int(rhetjd_nums[2]) if len(rhetjd_nums) > 2 else None
+
+        # ── Property Type ───────────────────────────────────────────────────
+        name_m = re.search(r'itemProp="name" content="([^"]+)"', block)
+        prop_type = name_m.group(1) if name_m else None
+
+        # ── Sold date (may be empty for some listings) ───────────────────────
+        date_m = re.search(
+            r'(?:sold| Sold )[^<]{0,30}(\d{1,2}\s+\w+\s+\d{4})',
+            block
+        )
+        sold_date = date_m.group(1) if date_m else None
+
+        if full_address or price:
+            listings.append({
+                'address': full_address,
+                'price': price,
+                'priceStr': price_str,
+                'beds': beds,
+                'baths': baths,
+                'cars': cars,
+                'soldDate': sold_date,
+                'propertyType': prop_type,
+            })
+
+    return listings
 
 
 # ─── /api/health ──────────────────────────────────────────────────────────────
@@ -95,9 +163,7 @@ def health():
 def autosuggest(q: str = Query(..., min_length=2)):
     """
     Address autosuggest via Nominatim (OpenStreetMap).
-    Falls back to postcode/locality level when street-level not found.
     Returns: {suggestions: [{label, lat, lon, type}]}
-    type values: "address" | "suburb" | "postcode" | "city"
     """
     suggestions = []
     try:
@@ -121,33 +187,29 @@ def autosuggest(q: str = Query(..., min_length=2)):
         addr = item.get("address", {})
         atype = item.get("type", "place")
 
-        # Build clean label from address components
         label_parts = []
-        # House number + road
         if addr.get("house_number") and addr.get("road"):
             label_parts.append(f"{addr['house_number']} {addr['road']}")
-        elif addr.get("neighbourhood") or addr.get("suburb"):
-            label_parts.append(addr.get("neighbourhood") or addr.get("suburb"))
-        # Locality / city
-        if addr.get("suburb"):
+        elif addr.get("neighbourhood"):
+            label_parts.append(addr["neighbourhood"])
+        elif addr.get("suburb"):
+            label_parts.append(addr["suburb"])
+        if addr.get("suburb") and addr.get("house_number"):
+            pass  # already included
+        elif addr.get("suburb"):
             label_parts.append(addr["suburb"])
         elif addr.get("city"):
             label_parts.append(addr["city"])
         elif addr.get("town"):
             label_parts.append(addr["town"])
-        elif addr.get("locality"):
-            label_parts.append(addr["locality"])
-        # State abbreviation
         if addr.get("state"):
             label_parts.append(_state_name_to_abbr(addr["state"]))
-        # Postcode
         if addr.get("postcode"):
             label_parts.append(addr["postcode"])
 
         label = ", ".join(label_parts) if label_parts else item.get("display_name", "")[:100]
 
-        # Only include Australian results
-        if item.get("display_name", "").endswith(", Australia") or "australia" in item.get("display_name", "").lower():
+        if "australia" in item.get("display_name", "").lower():
             suggestions.append({
                 "label": label,
                 "lat": float(item["lat"]),
@@ -160,97 +222,39 @@ def autosuggest(q: str = Query(..., min_length=2)):
 
 # ─── /api/property ────────────────────────────────────────────────────────────
 
-@app.get("/api/debug/allhomes")
-def debug_allhomes(slug: str = Query(default="carlton-vic-3053")):
-    """Debug endpoint: test allhomes GraphQL directly from Render."""
-    import json as _json, urllib.parse as _urllib
-    variables = _json.dumps({
-        "locality": {"slug": slug, "type": "DIVISION"},
-        "filters": {"beds": {"lower": 0}, "baths": {"lower": 0}, "parks": {"lower": 0}},
-        "duration": {"unit": "ALL"},
-        "sort": {"type": "SOLD_AGE", "order": "DESC"},
-        "page": 1, "pageSize": 5,
-    })
-    extensions = _json.dumps({
-        "persistedQuery": {
-            "version": 1,
-            "sha256Hash": "d16064a1e14de8b8192be6bece8e2bb0dec81e1d46d0736461fd8c9484211996",
-        }
-    })
-    query = _urllib.urlencode({
-        "operationName": "updateHistoryForLocality",
-        "variables": variables,
-        "extensions": extensions,
-    })
-    try:
-        r = httpx.get(
-            f"https://www.allhomes.com.au/graphql?{query}",
-            headers={
-                **HEADERS,
-                "x-apollo-operation-name": "updateHistoryForLocality",
-            },
-            timeout=15,
-        )
-        return {
-            "status_code": r.status_code,
-            "text": r.text[:500],
-        }
-    except Exception as e:
-        return {"error": str(e)}
-
-
 @app.get("/api/property")
 def get_property(address: str = Query(...)):
     """
-    Fetch property details and recent sold history for an address.
-    1. Extracts suburb/state/postcode slug from address.
-    2. Queries allhomes GraphQL for sold history of that locality.
-    3. Returns sold price records and estimated price range.
+    Fetch sold history for a property address.
+    Address format: '5 Smith St, Carlton VIC 3053' (minimum: 'Carlton VIC 3053')
 
-    Expected address format: '5 Smith St, Carlton VIC 3053'
-    Minimum required: 'Carlton VIC 3053' (suburb + postcode)
+    Returns: {
+      source, address, slug, propertyType, beds, baths, cars, landArea,
+      currentPrice, soldPrices (list), estimatedRange {min,max}, totalSold, searchUrl
+    }
     """
     slug = _slug_from_address(address)
     sold_prices = []
     estimated_range = None
 
     if slug:
-        data = _fetch_allhomes_history(slug, page_size=30)
-        nodes = (
-            data.get("data", {})
-            .get("historyForLocality", {})
-            .get("nodes", [])
-        )
+        raw_listings = _scrape_sold_listings(slug)
 
-        for node in nodes:
-            transfer = node.get("transfer", {})
-            features = node.get("features", {})
-            listing = node.get("listing", {})
-
-            line1 = node.get("address", {}).get("line1", "")
-            price = transfer.get("price")
-            date = node.get("date", "")[:10]
-            beds = features.get("bedrooms")
-            baths = features.get("bathrooms", {}).get("total")
-            cars = features.get("parking", {}).get("total")
-            prop_type = features.get("propertyType")
-            land_area = transfer.get("blockSize")
-            days_on_market = listing.get("daysOnMarket")
+        for item in raw_listings:
+            price = item.get('price')
+            date = item.get('soldDate', '')[:10] if item.get('soldDate') else ''
 
             sold_prices.append({
-                "price": price,
-                "date": date,
-                "address": line1,
-                "url": listing.get("url", ""),
-                "beds": beds,
-                "baths": baths,
-                "cars": cars,
-                "propertyType": prop_type,
-                "landArea": land_area,
-                "daysOnMarket": days_on_market,
+                'price': price,
+                'date': date,
+                'address': item.get('address', ''),
+                'beds': item.get('beds'),
+                'baths': item.get('baths'),
+                'cars': item.get('cars'),
+                'propertyType': item.get('propertyType'),
             })
 
-        # Compute estimated range from valid sold prices
+        # Compute estimated price range from valid sold prices
         valid_prices = [p["price"] for p in sold_prices if p["price"] and p["price"] > 50000]
         if len(valid_prices) >= 2:
             estimated_range = {
@@ -258,7 +262,6 @@ def get_property(address: str = Query(...)):
                 "max": max(valid_prices),
             }
 
-    # Use most recent sold record as representative "current" data
     current = sold_prices[0] if sold_prices else {}
 
     return {
@@ -271,12 +274,8 @@ def get_property(address: str = Query(...)):
         "cars": current.get("cars"),
         "landArea": current.get("landArea"),
         "currentPrice": current.get("price"),
-        "soldPrices": [
-            {k: v for k, v in p.items() if k != "url"}
-            for p in sold_prices[:20]
-            if p["price"]
-        ],
+        "soldPrices": [p for p in sold_prices[:20] if p["price"]],
         "estimatedRange": estimated_range,
         "totalSold": len(sold_prices),
-        "searchUrl": f"https://www.allhomes.com.au/buy/search?query={address}",
+        "searchUrl": f"https://www.allhomes.com.au/sold/{slug}/" if slug else "",
     }
