@@ -1,0 +1,6 @@
+name = "aussie-property-api"
+main = "cloudflare-worker.js"
+compatibility_date = "2025-05-01"
+
+[vars]
+ENV = "production"

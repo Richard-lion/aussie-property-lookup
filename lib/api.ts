@@ -1,7 +1,7 @@
 // Frontend API layer for Aussie Property Lookup
-// All API calls go through the same Vercel deployment (Next.js serverless functions)
+// All API calls go through the Cloudflare Worker backend (rlionpr1111.ccwu.cc)
 
-const API_BASE = ''; // same-origin, serverless routes under /api/
+const API_BASE = 'https://rlionpr1111.ccwu.cc';
 
 export interface AutosuggestResult {
   label: string;
@@ -39,7 +39,7 @@ export interface PropertyData {
 export async function fetchAutosuggest(query: string): Promise<AutosuggestResult[]> {
   if (!query || query.length < 2) return [];
   try {
-    const url = `/api/autosuggest?q=${encodeURIComponent(query)}`;
+    const url = `${API_BASE}/autosuggest?q=${encodeURIComponent(query)}`;
     const res = await fetch(url, { cache: 'no-store' });
     if (!res.ok) return [];
     const data = await res.json();
@@ -51,7 +51,7 @@ export async function fetchAutosuggest(query: string): Promise<AutosuggestResult
 
 export async function fetchProperty(address: string): Promise<PropertyData | null> {
   try {
-    const url = `/api/property?address=${encodeURIComponent(address)}`;
+    const url = `${API_BASE}/property?address=${encodeURIComponent(address)}`;
     const res = await fetch(url, { cache: 'no-store' });
     if (!res.ok) return null;
     return await res.json();
