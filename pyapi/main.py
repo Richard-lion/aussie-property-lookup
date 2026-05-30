@@ -46,28 +46,30 @@ def _state_name_to_abbr(state: str) -> str:
 
 def _fetch_allhomes_history(slug: str, page: int = 1, page_size: int = 20) -> dict:
     """Query allhomes GraphQL for sold history of a locality."""
+    import json as _json, urllib.parse as _urllib
     try:
-        variables = {
+        variables = _json.dumps({
             "locality": {"slug": slug, "type": "DIVISION"},
             "filters": {"beds": {"lower": 0}, "baths": {"lower": 0}, "parks": {"lower": 0}},
             "duration": {"unit": "ALL"},
             "sort": {"type": "SOLD_AGE", "order": "DESC"},
             "page": page,
             "pageSize": page_size,
-        }
-        extensions = {
+        })
+        extensions = _json.dumps({
             "persistedQuery": {
                 "version": 1,
                 "sha256Hash": "d16064a1e14de8b8192be6bece8e2bb0dec81e1d46d0736461fd8c9484211996",
             }
-        }
+        })
+        # Build URL with manually-encoded JSON strings (no double-encoding)
+        query = _urllib.urlencode({
+            "operationName": "updateHistoryForLocality",
+            "variables": variables,
+            "extensions": extensions,
+        })
         r = httpx.get(
-            "https://www.allhomes.com.au/graphql",
-            params={
-                "operationName": "updateHistoryForLocality",
-                "variables": variables,
-                "extensions": extensions,
-            },
+            f"https://www.allhomes.com.au/graphql?{query}",
             headers={
                 **HEADERS,
                 "x-apollo-operation-name": "updateHistoryForLocality",
