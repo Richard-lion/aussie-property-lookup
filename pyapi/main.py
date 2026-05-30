@@ -157,6 +157,30 @@ def health():
     return {"status": "ok", "service": "aussie-property-api"}
 
 
+@app.get("/api/debug/scrape")
+def debug_scrape(slug: str = Query(...)):
+    """Debug: return raw HTML length and listing IDs found from allhomes."""
+    url = f"https://www.allhomes.com.au/sold/{slug}/"
+    try:
+        r = httpx.get(url, headers=HEADERS, timeout=15)
+        html = r.text
+        listing_ids = re.findall(
+            r'id="allhomes-search-listing-card-listing-details-(\d+)"',
+            html
+        )
+        prices_found = re.findall(r'\$(\d{3}(?:,\d{3})+)', html[:500000])
+        return {
+            "url": url,
+            "status_code": r.status_code,
+            "html_length": len(html),
+            "listing_ids_found": len(listing_ids),
+            "price_count_in_first_500k": len(prices_found),
+            "first_price": prices_found[0] if prices_found else None,
+        }
+    except Exception as e:
+        return {"url": url, "error": str(e)}
+
+
 # ─── /api/autosuggest ─────────────────────────────────────────────────────────
 
 @app.get("/api/autosuggest")
