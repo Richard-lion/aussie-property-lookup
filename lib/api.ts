@@ -1,7 +1,7 @@
 // Frontend API layer for Aussie Property Lookup
-// All API calls go through the Render backend
+// All API calls go through the same Vercel deployment (Next.js serverless functions)
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? 'https://aussie-property-api.onrender.com';
+const API_BASE = ''; // same-origin, serverless routes under /api/
 
 export interface AutosuggestResult {
   label: string;
@@ -39,8 +39,8 @@ export interface PropertyData {
 export async function fetchAutosuggest(query: string): Promise<AutosuggestResult[]> {
   if (!query || query.length < 2) return [];
   try {
-    const url = `${API_BASE}/api/autosuggest?q=${encodeURIComponent(query)}`;
-    const res = await fetch(url, { next: { revalidate: 0 } });
+    const url = `/api/autosuggest?q=${encodeURIComponent(query)}`;
+    const res = await fetch(url, { cache: 'no-store' });
     if (!res.ok) return [];
     const data = await res.json();
     return data.suggestions ?? [];
@@ -51,8 +51,8 @@ export async function fetchAutosuggest(query: string): Promise<AutosuggestResult
 
 export async function fetchProperty(address: string): Promise<PropertyData | null> {
   try {
-    const url = `${API_BASE}/api/property?address=${encodeURIComponent(address)}`;
-    const res = await fetch(url, { next: { revalidate: 0 } });
+    const url = `/api/property?address=${encodeURIComponent(address)}`;
+    const res = await fetch(url, { cache: 'no-store' });
     if (!res.ok) return null;
     return await res.json();
   } catch {
