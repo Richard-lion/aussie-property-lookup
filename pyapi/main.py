@@ -160,6 +160,45 @@ def autosuggest(q: str = Query(..., min_length=2)):
 
 # ─── /api/property ────────────────────────────────────────────────────────────
 
+@app.get("/api/debug/allhomes")
+def debug_allhomes(slug: str = Query(default="carlton-vic-3053")):
+    """Debug endpoint: test allhomes GraphQL directly from Render."""
+    import json as _json, urllib.parse as _urllib
+    variables = _json.dumps({
+        "locality": {"slug": slug, "type": "DIVISION"},
+        "filters": {"beds": {"lower": 0}, "baths": {"lower": 0}, "parks": {"lower": 0}},
+        "duration": {"unit": "ALL"},
+        "sort": {"type": "SOLD_AGE", "order": "DESC"},
+        "page": 1, "pageSize": 5,
+    })
+    extensions = _json.dumps({
+        "persistedQuery": {
+            "version": 1,
+            "sha256Hash": "d16064a1e14de8b8192be6bece8e2bb0dec81e1d46d0736461fd8c9484211996",
+        }
+    })
+    query = _urllib.urlencode({
+        "operationName": "updateHistoryForLocality",
+        "variables": variables,
+        "extensions": extensions,
+    })
+    try:
+        r = httpx.get(
+            f"https://www.allhomes.com.au/graphql?{query}",
+            headers={
+                **HEADERS,
+                "x-apollo-operation-name": "updateHistoryForLocality",
+            },
+            timeout=15,
+        )
+        return {
+            "status_code": r.status_code,
+            "text": r.text[:500],
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @app.get("/api/property")
 def get_property(address: str = Query(...)):
     """
