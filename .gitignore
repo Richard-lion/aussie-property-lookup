@@ -1,0 +1,9 @@
+node_modules/
+.next/
+out/
+.cache/
+.pyc/
+__pycache__/
+.env
+.env.local
+.vercel/
